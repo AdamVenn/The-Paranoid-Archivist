@@ -1,13 +1,11 @@
 # Standard library
 import os
-import sys
 import shutil
 import yaml
 import csv
 import re
 from datetime import date
 from datetime import datetime
-import subprocess  # Shamefully not cross-platform, for permissions
 
 
 # TO DO:
@@ -346,6 +344,7 @@ class BackupJob:
             files[:] = [f for f in files if self.extension(f) not in self.lstFilters]
 
             # Sort videos into most recent and old
+            # TO DO: Add in 'Don't filter videos option'
             lstVids = [os.path.join(srcPath, x) for x in files if self.extension(x) in ('.mov', '.mp4')]
             if lstVids:
                 if 'VFX' not in srcPath and self.dicOpts['Keep only most recent videos']:
@@ -506,7 +505,6 @@ class BackupJob:
         for pathDest in self.lstPathDest:
             self.create_log(pathDest)
             self.reproduce_folder_structure(pathDest)
-            self.save_file_lists(pathDest + '/Backup logs')
             for src in self.get_file_list():
                 file = os.path.relpath(src, self.pathSource)
                 dest = os.path.join(pathDest, file)
@@ -522,6 +520,7 @@ class BackupJob:
             if self.dicOpts['Reset permissions']:
                 self.reset_permissions()
 
+
     def check_metadata(self):
         """
         Check the metadata between the source and the destinations after the copy
@@ -531,40 +530,15 @@ class BackupJob:
     def reset_permissions(self):
         """
         Reset the permissions for the transferred files.
-        Currently UNIX only. Please contact developer if you need Windows support.
         """
-        if sys.platform == 'darwin':
-            for destPath in self.lstPathDest:
+        # Would like TO DO owner as well, but who the hell should it be?
+        for destPath in self.lstPathDest:
+            for path, dirs, files in os.walk(destPath):
                 try:
-                    subprocess.run(['chmod', '-RN', destPath], check=True)
-                    self.write_log("-", destPath, "Recursively cleared all permissions")
+                    os.chmod(path, 0o777)
+                    self.write_log("-", path, "Set permissions to read/write")
                 except Exception as e:
-                    self.write_log("-", destPath, "Recursively cleared all permissions", e)
-        if os.name == 'posix':
-            for destPath in self.lstPathDest:
-                try:
-                    subprocess.run(['chmod', '-R', '777', destPath], check=True)
-                    self.write_log("-", destPath, "Recursively set all permissions to read/write")
-                except Exception as e:
-                    self.write_log("-", destPath, "Recursively set all permissions to read/write", e)
-
-        else:
-            return False
-
-        # for destPath in self.lstPathDest:
-        #     for path, dirs, files in os.walk(destPath):
-        #         for d in dirs:
-        #             try:
-        #                 os.chmod(path + d, 0o777)
-        #                 self.write_log("-", path + d, "Set permissions to read/write")
-        #             except Exception as e:
-        #                 self.write_log("-", path + d, "Set permissions to read/write", e)
-        #         for f in files:
-        #             try:
-        #                 os.chmod(path + f, 0o777)
-        #                 self.write_log("-", path + f, "Set permissions to read/write")
-        #             except Exception as e:
-        #                 self.write_log("-", path + f, "Set permissions to read/write", e)
+                    self.write_log("-", path, "Set permissions to read/write", e)
 
     def delete_source_files(self):
         """
@@ -580,7 +554,6 @@ class BackupJob:
         """
 
         today = str(date.today())
-
         self.strLogFileName = f"{copyDest}/Backup logs/{os.path.basename(self.get_source())} {today} main.csv"
         os.makedirs(os.path.dirname(self.strLogFileName), exist_ok=True)
 
@@ -742,23 +715,23 @@ class QueueToBackup:
 
 def test_copy():
     job = BackupJob()
-    dirPath = '/home/adam/Desktop/testing/testFolder/'
+    dirPath = '/Volumes/HFS/python/double_backup/testing/testFolder'
     job.set_source(dirPath)
-    dirPath = '/home/adam/Desktop/testing/testFolderCopy'
+    dirPath = '/Volumes/HFS/python/double_backup/testing/testFolderCopy'
     job.add_destination(dirPath)
     job.set_options(
         {
             'Delete after': False,
             'Check metadata': False,
-            'Reset permissions': True,
+            'Reset permissions': False,
             'Skip empty folders': False,
             'Copy invisible files': True,
             'Keep only most recent videos': False
         }
     )
-    # job.add_dirs_to_skip('')
+    job.add_dirs_to_skip('/Volumes/HFS/python/double_backup/testing/testFolder/Exclude me')
     job.create_log(job.get_destinations()[0])
-    job.copy_files()
+    job.save_file_lists(dirPath + '/File lists')
 
 
 if __name__ == '__main__':
