@@ -1,22 +1,23 @@
 # Standard library
 import os
+import sys
 import shutil
-import yaml
 import csv
 import re
 from datetime import date
 from datetime import datetime
+import subprocess  # Shamefully not cross-platform, for permissions
 
+# Get from Pip please
+import yaml
 
-# TO DO:
-#       - Logging:
-#           - Log files not copied due to file extensions
-#       - Implement options:
-#           - Delete after
-#           - Check metadata
-#       - Check there is space on the drive for the copy
-#       - I think it's currently impossible to skip files without an extension
-#       - When copy files is actually launched, recalculate file list?
+# NOTES:
+#       - Things TPA cannot do:
+#           - Skip files without an extension
+#           - Skip individual files
+#       - A lot of reliance is placed on the calculated file list,
+#         if things change after the calculation, things could go screwy.
+
 
 class BackupJob:
     def __init__(self):
@@ -25,7 +26,7 @@ class BackupJob:
         self.lstPathDest = []
         self.dicOpts = {
             'Delete after': False,
-            'Check metadata': False,
+            'Check sizes after': False,
             'Reset permissions': True,
             'Skip empty folders': True,
             'Copy invisible files': False,
@@ -40,6 +41,7 @@ class BackupJob:
         self.lstDirsInvis = []
         self.lstFilesVis = []
         self.lstFilesInvis = []
+        self.lstFilesWillSkip = []
         self.lstVidsToCopy = []
         self.lstVidsWillSkip = []
 
@@ -291,6 +293,7 @@ class BackupJob:
             self.lstDirsInvis
             self.lstFilesVis
             self.lstFilesInvis
+            self.lstFilesWillSkip
             self.lstVidsToCopy
             self.lstVidsWillSkip
             self.countFiles
@@ -315,6 +318,7 @@ class BackupJob:
             self.lstDirsInvis = []
             self.lstFilesVis = []
             self.lstFilesInvis = []
+            self.lstFilesWillSkip = []
             self.lstVidsToCopy = []
             self.lstVidsWillSkip = []
             self.countFiles = 0
@@ -341,10 +345,10 @@ class BackupJob:
                     self.lstDirsInvis.append(os.path.join(srcPath, directory))
 
             # Exclude file extensions
+            self.lstFilesWillSkip += [f for f in files if self.extension(f) in self.lstFilters]
             files[:] = [f for f in files if self.extension(f) not in self.lstFilters]
 
             # Sort videos into most recent and old
-            # TO DO: Add in 'Don't filter videos option'
             lstVids = [os.path.join(srcPath, x) for x in files if self.extension(x) in ('.mov', '.mp4')]
             if lstVids:
                 if 'VFX' not in srcPath and self.dicOpts['Keep only most recent videos']:
@@ -413,6 +417,7 @@ class BackupJob:
         fpDirsInvis    = filePrefix + 'Directories invisible.csv'
         fpFilesVis     = filePrefix + 'Files visible.csv'
         fpFilesInvis   = filePrefix + 'Files invisible.csv'
+        fpFilesWillSkip= filePrefix + 'Files to skip.csv'
         fpVidsToCopy   = filePrefix + 'Videos to copy.csv'
         fpVidsWillSkip = filePrefix + 'Videos to skip.csv'
 
@@ -436,6 +441,11 @@ class BackupJob:
         with open(fpFilesInvis, mode='w') as file:
             writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
             for i in self.lstFilesInvis:
+                writer.writerow([i])
+
+        with open(fpFilesWillSkip, mode='w') as file:
+            writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+            for i in self.lstFilesWillSkip:
                 writer.writerow([i])
 
         with open(fpVidsToCopy, mode='w') as file:
@@ -496,15 +506,29 @@ class BackupJob:
         """
         return all([os.access(dest, os.F_OK | os.W_OK) for dest in self.lstPathDest])
 
+    def check_space_on_drive(self) -> list:
+        """
+        Make sure we have enough space on the drive to do the copy
+        """
+        if self.sizeFiles == 0:
+            raise ValueError("Please calculate size of copy before checking drive space.")
+
+        return [[x, False] if self.sizeFiles > shutil.disk_usage(x).free else [x, True] for x in self.lstPathDest]
+
     def copy_files(self, progress=None, index=None):
         """
         Copy the files from the source to the destinations
-        progress is used for communicating the progress as a multiprocessing child
+        progress and index are used for communicating the progress as a multiprocessing child
         """
+
+        drivesWithoutEnoughSpace = [x[0] for x in self.check_space_on_drive() if not x[1]]
+        if drivesWithoutEnoughSpace:
+            raise IOError(f"Not enough space on the following destinations: {drivesWithoutEnoughSpace[0]}")
 
         for pathDest in self.lstPathDest:
             self.create_log(pathDest)
             self.reproduce_folder_structure(pathDest)
+            self.save_file_lists(pathDest + '/Backup logs')
             for src in self.get_file_list():
                 file = os.path.relpath(src, self.pathSource)
                 dest = os.path.join(pathDest, file)
@@ -520,31 +544,89 @@ class BackupJob:
             if self.dicOpts['Reset permissions']:
                 self.reset_permissions()
 
+        if self.dicOpts['Check sizes after']:
+            okayToDelete = self.check_metadata()
+
+        if self.dicOpts['Delete after'] and okayToDelete:
+            self.delete_source_files()
 
     def check_metadata(self):
         """
-        Check the metadata between the source and the destinations after the copy
+        Check the file sizes between the source and the destinations after the copy
         """
-        pass
+        allFileSizesMatch = True
+        for pathDest in self.lstPathDest:
+            for src in self.get_file_list():
+                file = os.path.relpath(src, self.pathSource)
+                dest = os.path.join(pathDest, file)
+                try:
+                    if os.path.getsize(src) == os.path.getsize(dest):
+                        self.write_log(src, dest, "File sizes match.")
+                    else:
+                        allFileSizesMatch = False
+                        self.write_log(src, dest, "File sizes do not match")
+                except Exception as e:
+                    self.write_log(src, dest, "Check if file sizes match", e)
+
+        return allFileSizesMatch
 
     def reset_permissions(self):
         """
         Reset the permissions for the transferred files.
+        Currently UNIX only. Please contact developer if you need Windows support.
         """
-        # Would like TO DO owner as well, but who the hell should it be?
-        for destPath in self.lstPathDest:
-            for path, dirs, files in os.walk(destPath):
+        if sys.platform == 'darwin':
+            for destPath in self.lstPathDest:
                 try:
-                    os.chmod(path, 0o777)
-                    self.write_log("-", path, "Set permissions to read/write")
+                    subprocess.run(['chmod', '-RN', destPath], check=True)
+                    self.write_log("-", destPath, "Recursively cleared all permissions")
                 except Exception as e:
-                    self.write_log("-", path, "Set permissions to read/write", e)
+                    self.write_log("-", destPath, "Recursively cleared all permissions", e)
+        if os.name == 'posix':
+            for destPath in self.lstPathDest:
+                try:
+                    subprocess.run(['chmod', '-R', '777', destPath], check=True)
+                    self.write_log("-", destPath, "Recursively set all permissions to read/write")
+                except Exception as e:
+                    self.write_log("-", destPath, "Recursively set all permissions to read/write", e)
+
+        else:
+            return False
+
+        # for destPath in self.lstPathDest:
+        #     for path, dirs, files in os.walk(destPath):
+        #         for d in dirs:
+        #             try:
+        #                 os.chmod(path + d, 0o777)
+        #                 self.write_log("-", path + d, "Set permissions to read/write")
+        #             except Exception as e:
+        #                 self.write_log("-", path + d, "Set permissions to read/write", e)
+        #         for f in files:
+        #             try:
+        #                 os.chmod(path + f, 0o777)
+        #                 self.write_log("-", path + f, "Set permissions to read/write")
+        #             except Exception as e:
+        #                 self.write_log("-", path + f, "Set permissions to read/write", e)
 
     def delete_source_files(self):
         """
-        Delete the original sources (once the backups have been verified)
+        Delete the original sources (preferably once the backups have been verified)
         """
-        pass
+        for srcPath, dirs, files in os.walk(self.pathSource, topdown=False):
+            for f in files:
+                try:
+                    src = os.path.join(srcPath, f)
+                    self.write_log(src, '', "Deleting")
+                    os.remove(src)
+                except Exception as e:
+                    self.write_log(src, '', "Deleting", e)
+            for d in dirs:
+                try:
+                    src = os.path.join(srcPath, d)
+                    self.write_log(src, '', "Deleting")
+                    os.rmdir(src)
+                except Exception as e:
+                    self.write_log(src, '', "Deleting", e)
 
     def create_log(self, copyDest: str):
         """
@@ -554,6 +636,7 @@ class BackupJob:
         """
 
         today = str(date.today())
+
         self.strLogFileName = f"{copyDest}/Backup logs/{os.path.basename(self.get_source())} {today} main.csv"
         os.makedirs(os.path.dirname(self.strLogFileName), exist_ok=True)
 
@@ -715,23 +798,23 @@ class QueueToBackup:
 
 def test_copy():
     job = BackupJob()
-    dirPath = '/Volumes/HFS/python/double_backup/testing/testFolder'
+    dirPath = ''
     job.set_source(dirPath)
-    dirPath = '/Volumes/HFS/python/double_backup/testing/testFolderCopy'
+    dirPath = ''
     job.add_destination(dirPath)
     job.set_options(
         {
             'Delete after': False,
-            'Check metadata': False,
-            'Reset permissions': False,
+            'Check sizes after': False,
+            'Reset permissions': True,
             'Skip empty folders': False,
             'Copy invisible files': True,
             'Keep only most recent videos': False
         }
     )
-    job.add_dirs_to_skip('/Volumes/HFS/python/double_backup/testing/testFolder/Exclude me')
-    job.create_log(job.get_destinations()[0])
-    job.save_file_lists(dirPath + '/File lists')
+    job.add_filter(['.yaml'])
+    job.get_file_list()
+    job.copy_files()
 
 
 if __name__ == '__main__':

@@ -11,9 +11,8 @@ import wx.adv
 from backup_data import BackupJob, QueueToBackup
 
 # TO DO:
-#   - Make decorator for any button that populates the job to get the current job in readable form and do nothing if no current job
-#   - Reminder to update NeoFinder
 #   - Raise all errors to messageboxes
+#   - Make decorator for any button that populates the job to get the current job in readable form and do nothing if no current job
 
 
 EvtUpdateScheduleText, EVT_SCHEDULE = NewEvent()
@@ -618,6 +617,8 @@ class FrMainwindow(wx.Frame):
                 return f"Job {index + 1} has no destination directories."
             if not job.check_folder_permissions():
                 return f"Do not have permission to write to destination of job {index + 1}."
+            if not job.check_space_on_drive():
+                return f"Do not have enough space on the drive for job {index + 1}."
         return False
 
     def gen_queue_selection(self):
